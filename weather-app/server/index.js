@@ -31,22 +31,6 @@ function setCache(key, value, ttlMs = TTL_MS) {
   cache.set(key, { value, expiresAt: Date.now() + ttlMs });
 }
 
-// Helper to cache binary (Buffer) responses separately
-const binaryCache = new Map();
-function getBinaryCache(key) {
-  const entry = binaryCache.get(key);
-  if (!entry) return null;
-  const { value, contentType, expiresAt } = entry;
-  if (Date.now() > expiresAt) {
-    binaryCache.delete(key);
-    return null;
-  }
-  return { value, contentType };
-}
-function setBinaryCache(key, value, contentType, ttlMs = 5 * 60 * 1000) {
-  binaryCache.set(key, { value, contentType, expiresAt: Date.now() + ttlMs });
-}
-
 // Helper: map Open-Meteo weather codes to simple icon keywords
 const weatherCodeMap = {
   0: 'clear',
@@ -225,107 +209,6 @@ app.get('/api/weather/coords', async (req, res) => {
   }
 });
 
-// --- Radar tile proxy (RainViewer) ---
-// Example upstream: https://tilecache.rainviewer.com/v2/radar/nowcast_0/256/{z}/{x}/{y}/1/1_1.png
-// We proxy to avoid CORS and add short-term caching.
-app.get('/api/tiles/radar/:z/:x/:y.png', async (req, res) => {
-  try {
-    const { z, x, y } = req.params;
-    const upstream = `https://tilecache.rainviewer.com/v2/radar/nowcast_0/256/${z}/${x}/${y}/1/1_1.png`;
-    const cacheKey = `tile:${z}:${x}:${y}`;
-    const cached = getBinaryCache(cacheKey);
-    if (cached) {
-      res.set('Content-Type', cached.contentType || 'image/png');
-      res.set('Cache-Control', 'public, max-age=120');
-      return res.send(cached.value);
-    }
-    const response = await axios.get(upstream, { responseType: 'arraybuffer', timeout: 8000 });
-    const buf = Buffer.from(response.data);
-    const contentType = response.headers['content-type'] || 'image/png';
-    setBinaryCache(cacheKey, buf, contentType, 2 * 60 * 1000);
-    res.set('Content-Type', contentType);
-    res.set('Cache-Control', 'public, max-age=120');
-    res.send(buf);
-  } catch (err) {
-    res.status(502).json({ error: 'Failed to fetch radar tile' });
-  }
-});
-
-// --- Nearby stations via Meteostat (optional API key) ---
-// Set METEOSTAT_API_KEY in .env to enable.
-async function fetchNearbyStations(lat, lon, limit = 5) {
-  const key = `stations:${lat.toFixed(2)},${lon.toFixed(2)}:${limit}`;
-  const cached = getCache(key);
-  if (cached) return cached;
-  const apiKey = process.env.METEOSTAT_API_KEY;
-  if (!apiKey) {
-    throw { status: 503, message: 'Stations API not configured' };
-  }
-  const base = 'https://api.meteostat.net/v2/stations/nearby';
-  const { data } = await axios.get(base, {
-    params: { lat, lon, limit },
-    headers: { 'x-api-key': apiKey }
-  });
-  const stations = (data?.data || []).map(s => ({
-    id: s.id,
-    name: s.name,
-    country: s.country,
-    region: s.region,
-    distance: s.distance,
-    latitude: s.latitude,
-    longitude: s.longitude,
-    elevation: s.elevation
-  }));
-  setCache(key, stations, 60 * 60 * 1000);
-  return stations;
-}
-
-async function fetchLatestForStation(id) {
-  const key = `station:${id}:latest`;
-  const cached = getCache(key);
-  if (cached) return cached;
-  const apiKey = process.env.METEOSTAT_API_KEY;
-  if (!apiKey) {
-    throw { status: 503, message: 'Stations API not configured' };
-  }
-  const url = 'https://api.meteostat.net/v2/stations/hourly';
-  const today = new Date().toISOString().slice(0, 13) + ':00';
-  const { data } = await axios.get(url, {
-    params: { station: id, start: today, end: today, tz: 'UTC' },
-    headers: { 'x-api-key': apiKey }
-  });
-  const latest = data?.data?.[0] || null;
-  setCache(key, latest, 15 * 60 * 1000);
-  return latest;
-}
-
-app.get('/api/stations/nearby', async (req, res) => {
-  try {
-    const lat = parseFloat(req.query.lat);
-    const lon = parseFloat(req.query.lon);
-    const limit = Math.min(parseInt(req.query.limit || '5', 10), 10);
-    if (Number.isNaN(lat) || Number.isNaN(lon)) {
-      return res.status(400).json({ error: 'lat and lon are required numbers' });
-    }
-    const stations = await fetchNearbyStations(lat, lon, limit);
-    res.json({ stations });
-  } catch (err) {
-    const status = err?.status || 500;
-    res.status(status).json({ error: err?.message || 'Failed to fetch stations' });
-  }
-});
-
-app.get('/api/stations/:id/latest', async (req, res) => {
-  try {
-    const id = req.params.id;
-    const latest = await fetchLatestForStation(id);
-    res.json({ latest });
-  } catch (err) {
-    const status = err?.status || 500;
-    res.status(status).json({ error: err?.message || 'Failed to fetch station latest' });
-  }
-});
-
 // --- MongoDB (Favorites) ---
 let dbReady = false;
 const MONGODB_URI = process.env.MONGODB_URI;
@@ -381,6 +264,46 @@ app.post('/api/locations', async (req, res) => {
     res.status(201).json({ location: doc });
   } catch (err) {
     res.status(500).json({ error: 'Failed to save location' });
+  }
+});
+
+app.put('/api/locations/:id', async (req, res) => {
+  try {
+    if (!dbReady) return res.status(503).json({ error: 'Database not configured' });
+    const userId = 'demo';
+    const { id } = req.params;
+    const { name, latitude, longitude } = req.body || {};
+    const update = {};
+    if (name != null) update.name = name;
+    if (latitude != null) update.latitude = latitude;
+    if (longitude != null) update.longitude = longitude;
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+    const doc = await Favorite.findOneAndUpdate(
+      { _id: id, userId },
+      { $set: update },
+      { new: true }
+    ).lean();
+    if (!doc) return res.status(404).json({ error: 'Location not found' });
+    res.json({ location: doc });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update location' });
+  }
+});
+
+app.delete('/api/locations/:id', async (req, res) => {
+  try {
+    if (!dbReady) return res.status(503).json({ error: 'Database not configured' });
+    const userId = 'demo';
+    const { id } = req.params;
+    const result = await Favorite.deleteOne({ _id: id, userId });
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ error: 'Location not found' });
+    }
+    res.status(204).send();
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete location' });
   }
 });
 

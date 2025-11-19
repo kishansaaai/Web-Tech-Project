@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Routes, Route, Link } from 'react-router-dom'
 import App from './App'
-import { getLocations } from './services/api' // same path used in App.jsx
+import { getLocations, updateLocation, deleteLocation } from './services/api' // same path used in App.jsx
 
 function Saved() {
   const [loading, setLoading] = useState(true)
@@ -36,6 +36,44 @@ function Saved() {
     return () => { alive = false }
   }, [])
 
+  const refresh = async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const data = await getLocations()
+      const items = data?.locations ?? data ?? []
+      setLocations(Array.isArray(items) ? items : [])
+    } catch (e) {
+      setError(e?.response?.data?.error || e.message || 'Failed to load favorites')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const onRename = async (loc) => {
+    const current = loc.name || loc.city || ''
+    const next = window.prompt('New name for this location:', current)
+    if (!next || next === current) return
+    try {
+      setError('')
+      await updateLocation(loc._id, { name: next })
+      await refresh()
+    } catch (e) {
+      setError(e?.response?.data?.error || e.message || 'Failed to update location')
+    }
+  }
+
+  const onDelete = async (loc) => {
+    if (!window.confirm('Delete this saved location?')) return
+    try {
+      setError('')
+      await deleteLocation(loc._id)
+      await refresh()
+    } catch (e) {
+      setError(e?.response?.data?.error || e.message || 'Failed to delete location')
+    }
+  }
+
   return (
     <div className="container">
       <header>
@@ -58,6 +96,10 @@ function Saved() {
             <div><strong>{loc.name || loc.city || 'Unknown'}</strong></div>
             <div className="muted">Lat: {loc.latitude}, Lon: {loc.longitude}</div>
             {loc.createdAt && <div className="muted">Saved: {new Date(loc.createdAt).toLocaleString()}</div>}
+            <div className="row" style={{ marginTop: 8, gap: 8 }}>
+              <button type="button" onClick={() => onRename(loc)}>Rename</button>
+              <button type="button" onClick={() => onDelete(loc)}>Delete</button>
+            </div>
           </div>
         ))}
       </div>

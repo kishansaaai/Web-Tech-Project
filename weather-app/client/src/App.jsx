@@ -3,7 +3,6 @@ import React, { useEffect, useState, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { getByCity, getByCoords, saveLocation, geocode } from './services/api'
 import HourlyChart from './components/HourlyChart'
-import MapView from './components/MapView'
 
 /* -------------------------
    SearchBar with autosuggest
@@ -280,20 +279,6 @@ export default function App() {
     }
   }
 
-  const onMapSelect = async (lat, lon) => {
-    try {
-      setLoading(true)
-      setError('')
-      const data = await getByCoords(lat, lon)
-      setPlace(data.place || null)
-      setForecast(data.forecast)
-    } catch (e) {
-      setError(e.message || 'Failed to fetch')
-    } finally {
-      setLoading(false)
-    }
-  }
-
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
     localStorage.setItem('theme', theme)
@@ -355,7 +340,6 @@ export default function App() {
       {error && <p className="error">{error}</p>}
 
       <CurrentWeatherCard place={place} current={forecast?.current} />
-      <MapView onSelect={onMapSelect} />
       <HourlyChart labels={forecast?.hourly?.time || []} temps={forecast?.hourly?.temperature || []} />
       <ForecastList daily={forecast?.daily} />
     </div>
